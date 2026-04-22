@@ -52,15 +52,20 @@ function App() {
     <div className="relative min-h-screen overflow-x-hidden px-4 pb-12 pt-8 text-fair-ink sm:px-8 lg:px-14">
       <div className="pointer-events-none absolute inset-0 -z-10 opacity-70" aria-hidden="true" />
 
-      <header className="glass-panel rounded-3xl p-5 sm:p-6">
+      <header className="glass-panel soft-shine rounded-3xl border border-slate-200/70 p-5 sm:p-6">
         <div className="flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
           <div>
-            <p className="font-mono text-xs uppercase tracking-[0.18em] text-fair-green">Live Fairness Ops</p>
-            <h1 className="font-heading text-3xl font-extrabold sm:text-4xl">FairWatch</h1>
-            <p className="mt-1 text-sm text-slate-600">Real-time AI bias monitoring after deployment.</p>
+            <p className="inline-flex items-center rounded-full bg-emerald-100 px-3 py-1 font-mono text-[11px] uppercase tracking-[0.18em] text-emerald-800">
+              Live Fairness Ops
+            </p>
+            <h1 className="mt-3 font-heading text-3xl font-black sm:text-4xl">FairWatch</h1>
+            <p className="mt-2 max-w-xl text-sm text-slate-600">
+              Real-time AI bias monitoring after deployment.
+            </p>
           </div>
 
-          <nav className="flex flex-wrap gap-2">
+          <nav className="rounded-2xl border border-slate-200 bg-white/60 p-2 shadow-sm">
+            <div className="flex flex-wrap gap-2">
             {NAV_ITEMS.map((item) => {
               const active = activePage === item.id;
               return (
@@ -69,8 +74,8 @@ function App() {
                   type="button"
                   className={`rounded-full px-4 py-2 text-sm font-semibold transition ${
                     active
-                      ? "bg-fair-ink text-white shadow-lg"
-                      : "bg-white/70 text-fair-ink hover:bg-white"
+                      ? "bg-gradient-to-r from-slate-900 to-slate-700 text-white shadow-lg"
+                      : "bg-white/80 text-fair-ink hover:bg-white"
                   }`}
                   onClick={() => setActivePage(item.id)}
                 >
@@ -78,6 +83,7 @@ function App() {
                 </button>
               );
             })}
+            </div>
           </nav>
         </div>
       </header>

@@ -49,7 +49,23 @@ def detect_drift(model_id: int, db: Optional[Session] = None) -> Dict[str, Any]:
         ]
         y_values = [float(report.disparity_score) for report in reports]
 
-        slope, intercept, r_value, p_value, std_err = linregress(x_values, y_values)
+        # Right after demo reset, reports can share the same timestamp.
+        # linregress cannot run with zero x-axis variance, so skip drift in that case.
+        if len(set(round(value, 8) for value in x_values)) < 2:
+            return {
+                "triggered": False,
+                "reason": "insufficient_temporal_variation",
+                "slope": 0.0,
+            }
+
+        try:
+            slope, intercept, r_value, p_value, std_err = linregress(x_values, y_values)
+        except ValueError:
+            return {
+                "triggered": False,
+                "reason": "regression_unavailable",
+                "slope": 0.0,
+            }
         slope = float(slope)
 
         if slope <= 0.05:

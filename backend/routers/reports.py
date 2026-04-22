@@ -117,7 +117,7 @@ def regenerate_latest_explanation(model_id: int, db: Session = Depends(get_db)):
         "proxy_warnings": [],
     }
 
-    explanation = generate_explanation(report_dict, feature_contributions)
+    explanation = generate_explanation(report_dict, feature_contributions, latest.fix_suggestions)
 
     for report in report_batch:
         report.explanation = explanation

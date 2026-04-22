@@ -24,6 +24,7 @@ import BiasScoreCard from "../components/BiasScoreCard";
 import DriftChart from "../components/DriftChart";
 import ExplainerPanel from "../components/ExplainerPanel";
 import FairnessTable from "../components/FairnessTable";
+import ChatPanel from "../components/ChatPanel";
 
 const METRICS = [
   "Demographic Parity Difference",
@@ -38,10 +39,10 @@ const PRIORITY_STYLES = {
   medium: "bg-amber-100 text-amber-800",
 };
 
-const FIX_TYPE_ICONS = {
-  reweight: "⚖️",
-  remove_proxy: "🚫",
-  threshold_tuning: "🎚️",
+const FIX_TYPE_LABELS = {
+  reweight: "Reweight",
+  remove_proxy: "Remove Proxy",
+  threshold_tuning: "Threshold Tuning",
 };
 
 function Dashboard({ models, selectedModelId, onModelChange, loadingModels }) {
@@ -70,11 +71,13 @@ function Dashboard({ models, selectedModelId, onModelChange, loadingModels }) {
       ]);
 
       let latest = null;
-      try {
-        latest = await getLatestReport(selectedModelId);
-      } catch (error) {
-        if (error?.response?.status !== 404) {
-          throw error;
+      if (reports.length > 0) {
+        try {
+          latest = await getLatestReport(selectedModelId);
+        } catch (error) {
+          if (error?.response?.status !== 404) {
+            throw error;
+          }
         }
       }
 
@@ -218,34 +221,47 @@ function Dashboard({ models, selectedModelId, onModelChange, loadingModels }) {
   }
 
   return (
-    <section className="space-y-4">
-      <div className="glass-panel rounded-2xl p-4">
-        <div className="flex flex-col gap-3 sm:flex-row">
+    <section className="space-y-5">
+      <div className="glass-panel soft-shine rounded-3xl border border-slate-200/70 p-5">
+        <div className="flex flex-col items-start gap-3 sm:flex-row sm:items-center">
           <button
             type="button"
-            className="rounded-xl bg-rose-600 px-4 py-2 text-sm font-semibold text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+            className="rounded-xl bg-gradient-to-r from-rose-700 to-rose-500 px-4 py-2 text-sm font-semibold text-white shadow-lg transition hover:scale-[1.01] hover:opacity-95 disabled:cursor-not-allowed disabled:opacity-50"
             onClick={handleInjectBias}
             disabled={!selectedModelId || isInjecting || isLoading}
           >
-            {isInjecting ? "Injecting..." : "🔴 Inject Bias"}
+            {isInjecting ? "Injecting..." : "Inject Bias"}
           </button>
 
           <button
             type="button"
-            className="rounded-xl bg-slate-700 px-4 py-2 text-sm font-semibold text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+            className="rounded-xl bg-gradient-to-r from-slate-800 to-slate-600 px-4 py-2 text-sm font-semibold text-white shadow-lg transition hover:scale-[1.01] hover:opacity-95 disabled:cursor-not-allowed disabled:opacity-50"
             onClick={handleResetDemo}
             disabled={!selectedModelId || isResetting || isLoading}
           >
-            {isResetting ? "Resetting..." : "🔄 Reset Demo"}
+            {isResetting ? "Resetting..." : "Reset Demo"}
           </button>
         </div>
-        <p className="mt-2 text-xs text-slate-500">Demo controls — simulate real-time bias injection</p>
+
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <span className="rounded-full bg-white/80 px-3 py-1 text-[11px] font-semibold uppercase tracking-wide text-slate-600">
+            Demo controls
+          </span>
+          <p className="text-xs text-slate-500">simulate real-time bias injection</p>
+        </div>
       </div>
 
-      <div className="glass-panel flex flex-col gap-3 rounded-2xl p-4 sm:flex-row sm:items-end sm:justify-between">
+      <div className="glass-panel soft-shine flex flex-col gap-4 rounded-3xl border border-slate-200/70 p-5 sm:flex-row sm:items-end sm:justify-between">
         <div>
           <p className="font-mono text-xs uppercase tracking-[0.15em] text-slate-500">Monitoring Dashboard</p>
-          <h2 className="font-heading text-2xl font-bold">Near Real-Time Batch Monitoring (window: last 100 predictions)</h2>
+          <h2 className="font-heading text-2xl font-extrabold leading-tight text-slate-900">
+            Near Real-Time Batch Monitoring (window: last 100 predictions)
+          </h2>
+
+          <div className="mt-3 flex flex-wrap gap-2">
+            <span className="rounded-full bg-emerald-100 px-3 py-1 text-xs font-semibold text-emerald-800">Polling: 30s</span>
+            <span className="rounded-full bg-sky-100 px-3 py-1 text-xs font-semibold text-sky-800">Bias pipeline: active</span>
+          </div>
         </div>
 
         <div className="w-full sm:w-80">
@@ -254,7 +270,7 @@ function Dashboard({ models, selectedModelId, onModelChange, loadingModels }) {
           </label>
           <select
             id="model-select"
-            className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm"
+            className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm shadow-sm"
             value={selectedModelId ?? ""}
             onChange={(event) => onModelChange(Number(event.target.value))}
             disabled={loadingModels}
@@ -271,14 +287,16 @@ function Dashboard({ models, selectedModelId, onModelChange, loadingModels }) {
       <AlertBanner severity={bannerSeverity} message={bannerMessage} />
 
       {errorMessage && (
-        <div className="rounded-xl border border-fair-red/30 bg-fair-red/10 px-4 py-2 text-sm text-fair-red">{errorMessage}</div>
+        <div className="rounded-2xl border border-rose-300/60 bg-rose-50 px-4 py-3 text-sm font-medium text-rose-700 shadow-sm">
+          {errorMessage}
+        </div>
       )}
 
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         {METRICS.map((metricName) => {
           const item = metricSummaries[metricName];
           return (
-            <div key={metricName} className="space-y-2">
+            <div key={metricName} className="animate-rise space-y-2">
               <BiasScoreCard metricName={metricName} score={item.score} />
               <p className="px-1 text-xs text-slate-500">{item.meaning}</p>
             </div>
@@ -290,7 +308,7 @@ function Dashboard({ models, selectedModelId, onModelChange, loadingModels }) {
 
       <DriftChart reports={reportHistory} />
 
-      <section className="glass-panel rounded-2xl p-5">
+      <section className="glass-panel soft-shine rounded-3xl border border-slate-200/70 p-6">
         <h3 className="font-heading text-lg font-semibold">Root Cause Analysis</h3>
 
         {!featureContributions.top_contributing_features?.length ? (
@@ -336,7 +354,7 @@ function Dashboard({ models, selectedModelId, onModelChange, loadingModels }) {
             </div>
 
             {!!featureContributions.proxy_warnings?.length && (
-              <div className="mt-4 rounded-xl border border-rose-200 bg-rose-50 p-3">
+              <div className="mt-4 rounded-xl border border-rose-200 bg-rose-50/85 p-3">
                 <p className="text-xs font-semibold uppercase tracking-wide text-rose-700">Proxy Warnings</p>
                 <ul className="mt-2 list-disc space-y-1 pl-4 text-sm text-rose-800">
                   {featureContributions.proxy_warnings.map((warning) => (
@@ -352,11 +370,14 @@ function Dashboard({ models, selectedModelId, onModelChange, loadingModels }) {
       <ExplainerPanel
         explanation={latestReport?.explanation}
         timestamp={latestReport?.timestamp}
+        severity={latestReport?.severity}
+        metrics={latestReport?.metrics}
+        fixSuggestions={fixSuggestions}
         onRegenerate={handleRegenerate}
         isRegenerating={isRegenerating}
       />
 
-      <section className="glass-panel rounded-2xl p-5">
+      <section className="glass-panel soft-shine rounded-3xl border border-slate-200/70 p-6">
         <h3 className="font-heading text-lg font-semibold">Recommended Actions</h3>
 
         {!fixSuggestions.fixes?.length ? (
@@ -364,9 +385,11 @@ function Dashboard({ models, selectedModelId, onModelChange, loadingModels }) {
         ) : (
           <div className="mt-4 space-y-3">
             {fixSuggestions.fixes.map((fix, index) => (
-              <article key={`${fix.type}-${index}`} className="rounded-xl border border-slate-200 bg-white/80 p-4">
+              <article key={`${fix.type}-${index}`} className="rounded-xl border border-slate-200 bg-white/85 p-4 shadow-sm">
                 <div className="flex flex-wrap items-center gap-2">
-                  <span className="text-lg" aria-hidden="true">{FIX_TYPE_ICONS[fix.type] || "🛠️"}</span>
+                  <span className="rounded-full bg-slate-100 px-2 py-1 text-[11px] font-semibold uppercase tracking-wide text-slate-600">
+                    {FIX_TYPE_LABELS[fix.type] || "Action"}
+                  </span>
                   <span
                     className={`rounded-full px-2 py-1 text-xs font-semibold uppercase ${
                       PRIORITY_STYLES[String(fix.priority || "").toLowerCase()] || "bg-slate-100 text-slate-700"
@@ -383,7 +406,7 @@ function Dashboard({ models, selectedModelId, onModelChange, loadingModels }) {
         )}
 
         {fixSuggestions.immediate_action && (
-          <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+          <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50/90 p-3 text-sm text-amber-900 shadow-sm">
             <span className="font-semibold">Immediate Action: </span>
             {fixSuggestions.immediate_action}
           </div>
@@ -391,6 +414,8 @@ function Dashboard({ models, selectedModelId, onModelChange, loadingModels }) {
       </section>
 
       <FairnessTable metrics={latestReport?.metrics || []} />
+      
+      <ChatPanel selectedModelId={selectedModelId} />
     </section>
   );
 }

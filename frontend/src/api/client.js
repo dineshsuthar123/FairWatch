@@ -75,4 +75,9 @@ export const resetDemo = async (modelId) => {
   return response.data;
 };
 
+export const sendChatMessage = async (modelId, query) => {
+  const response = await api.post(`/api/chat/${modelId}`, { query });
+  return response.data;
+};
+
 export const withApiError = (error, fallbackMessage) => toErrorMessage(error, fallbackMessage);

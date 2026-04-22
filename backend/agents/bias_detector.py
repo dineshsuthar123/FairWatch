@@ -1,22 +1,25 @@
 import json
 from itertools import combinations
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 import shap
+from sklearn.base import ClassifierMixin
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
+from sklearn.feature_selection import mutual_info_classif
 from sqlalchemy.orm import Session
 
 from database import SessionLocal
 from models import ModelRegistry, Prediction
 from utils.metrics import (
-    determine_severity,
     group_approval_rates,
     group_false_positive_rates,
+    group_sample_counts,
     group_true_positive_rates,
+    interpret_metric,
     majority_group,
     pairwise_gaps,
     pairwise_ratios,
@@ -102,38 +105,209 @@ def _extract_prediction_rows(predictions: List[Prediction], sensitive_attributes
 
 
 def _compute_shap_values(X: pd.DataFrame, y: pd.Series) -> np.ndarray:
-    if X.empty or y.empty:
-        return np.empty((0, 0))
+    if X.empty or y.empty or y.nunique() < 2:
+        raise ValueError("SHAP requires non-empty data and at least two target classes")
 
-    if y.nunique() < 2:
-        return np.zeros((len(X), len(X.columns)), dtype=float)
+    model: ClassifierMixin
+    mode = "tree"
 
     if X.shape[1] > 8:
-        model = RandomForestClassifier(n_estimators=120, random_state=42)
+        model = RandomForestClassifier(
+            n_estimators=180,
+            min_samples_leaf=2,
+            random_state=42,
+        )
         model.fit(X, y)
         explainer = shap.TreeExplainer(model)
         shap_values = explainer.shap_values(X)
     else:
-        model = LogisticRegression(max_iter=1000)
+        mode = "kernel"
+        model = LogisticRegression(max_iter=2000)
         model.fit(X, y)
-        explainer = shap.LinearExplainer(model, X)
-        shap_values = explainer.shap_values(X)
+        background = shap.sample(X, min(len(X), 30), random_state=42)
 
-    if isinstance(shap_values, list):
-        matrix = np.asarray(shap_values[-1], dtype=float)
-    else:
-        matrix = np.asarray(shap_values, dtype=float)
+        def predict_proba_positive(data: np.ndarray) -> np.ndarray:
+            frame = pd.DataFrame(data, columns=X.columns)
+            return model.predict_proba(frame)[:, 1]
 
+        explainer = shap.KernelExplainer(predict_proba_positive, background)
+        shap_values = explainer.shap_values(X, nsamples="auto")
+
+    matrix = np.asarray(shap_values[-1] if isinstance(shap_values, list) else shap_values, dtype=float)
     if matrix.ndim == 3:
         matrix = matrix[:, :, -1]
 
+    if matrix.shape[0] != len(X):
+        raise ValueError(f"SHAP output shape mismatch for {mode} explainer")
+
     return matrix
+
+
+def _dominance_adjusted_percentages(scores: Dict[str, float]) -> Dict[str, float]:
+    sanitized = {feature: max(0.0, float(value)) for feature, value in scores.items()}
+    if not sanitized:
+        return {}
+
+    total = sum(sanitized.values())
+    if total <= 0:
+        uniform = 100.0 / len(sanitized)
+        return {feature: uniform for feature in sanitized}
+
+    percentages = {feature: (value / total) * 100.0 for feature, value in sanitized.items()}
+    ranked = sorted(percentages.items(), key=lambda item: item[1], reverse=True)
+
+    if len(ranked) > 1:
+        top_feature, top_pct = ranked[0]
+        second_pct = ranked[1][1]
+        top_raw = sanitized[top_feature]
+        second_raw = sanitized[ranked[1][0]]
+        dominance_ratio = top_raw / (second_raw + 1e-9)
+        justified = dominance_ratio >= 8.0
+
+        if top_pct > 90.0 and not justified:
+            cap = 85.0
+            percentages[top_feature] = cap
+            remaining = 100.0 - cap
+
+            others = [feature for feature in percentages if feature != top_feature]
+            others_sum = sum(percentages[feature] for feature in others)
+            if others_sum <= 0:
+                each = remaining / len(others)
+                for feature in others:
+                    percentages[feature] = each
+            else:
+                scale = remaining / others_sum
+                for feature in others:
+                    percentages[feature] *= scale
+
+    rounded = {feature: round(value, 2) for feature, value in percentages.items()}
+    delta = round(100.0 - sum(rounded.values()), 2)
+    if rounded:
+        max_feature = max(rounded.items(), key=lambda item: item[1])[0]
+        rounded[max_feature] = round(rounded[max_feature] + delta, 2)
+
+    return rounded
+
+
+def _pairwise_disparity_from_shap(
+    df: pd.DataFrame,
+    shap_matrix: np.ndarray,
+    candidate_features: List[str],
+    sensitive_attributes: List[str],
+    min_group_size: int,
+) -> Dict[str, float]:
+    scores = {feature: 0.0 for feature in candidate_features}
+
+    for attribute in sensitive_attributes:
+        if attribute not in df.columns:
+            continue
+
+        counts = df[attribute].astype(str).value_counts()
+        groups = [group for group, count in counts.items() if int(count) >= min_group_size]
+        if len(groups) < 2:
+            continue
+
+        for group_a, group_b in combinations(groups, 2):
+            mask_a = df[attribute].astype(str) == str(group_a)
+            mask_b = df[attribute].astype(str) == str(group_b)
+            if not mask_a.any() or not mask_b.any():
+                continue
+
+            mean_a = np.abs(shap_matrix[mask_a.to_numpy()]).mean(axis=0)
+            mean_b = np.abs(shap_matrix[mask_b.to_numpy()]).mean(axis=0)
+            diff = np.abs(mean_a - mean_b)
+
+            for index, feature in enumerate(candidate_features):
+                scores[feature] += float(diff[index])
+
+    return scores
+
+
+def _fallback_feature_diffs(
+    df: pd.DataFrame,
+    candidate_features: List[str],
+    sensitive_attributes: List[str],
+) -> Tuple[Dict[str, float], str]:
+    feature_diffs = {feature: 0.0 for feature in candidate_features}
+    numeric_frame = pd.DataFrame({feature: _series_to_numeric(df[feature]) for feature in candidate_features})
+
+    for attribute in sensitive_attributes:
+        if attribute not in df.columns:
+            continue
+
+        counts = df[attribute].astype(str).value_counts()
+        groups = [group for group, count in counts.items() if int(count) >= 5]
+        if len(groups) < 2:
+            continue
+
+        for group_a, group_b in combinations(groups, 2):
+            pair_mask = df[attribute].astype(str).isin([str(group_a), str(group_b)])
+            if not pair_mask.any():
+                continue
+
+            pair_attribute = df.loc[pair_mask, attribute].astype(str)
+            pair_indicator = (pair_attribute == str(group_b)).astype(int).to_numpy()
+
+            for feature in candidate_features:
+                feature_values = pd.to_numeric(
+                    numeric_frame.loc[pair_mask, feature],
+                    errors="coerce",
+                ).fillna(0.0)
+
+                if feature_values.nunique(dropna=True) <= 1:
+                    continue
+
+                corr = feature_values.corr(pd.Series(pair_indicator, index=feature_values.index))
+                corr_score = 0.0 if pd.isna(corr) else abs(float(corr))
+
+                try:
+                    mi = mutual_info_classif(
+                        feature_values.to_numpy().reshape(-1, 1),
+                        pair_indicator,
+                        discrete_features=False,
+                        random_state=42,
+                    )[0]
+                    mi_score = float(max(0.0, mi))
+                except Exception:
+                    mi_score = 0.0
+
+                feature_diffs[feature] += max(corr_score, mi_score)
+
+    return feature_diffs, "approximate contribution"
+
+
+def format_contribution_output(
+    contribution_scores: Dict[str, float],
+    proxy_risk_features: set,
+    proxy_warnings: List[str],
+    mode: str,
+    top_k: int = 5,
+) -> Dict[str, Any]:
+    percentages = _dominance_adjusted_percentages(contribution_scores)
+    ranked = sorted(percentages.items(), key=lambda item: item[1], reverse=True)[:top_k]
+
+    top_contributing_features = [
+        {
+            "feature": feature,
+            "contribution_pct": pct,
+            "proxy_risk": feature in proxy_risk_features,
+            "contribution_mode": mode,
+        }
+        for feature, pct in ranked
+    ]
+
+    return {
+        "top_contributing_features": top_contributing_features,
+        "proxy_warnings": sorted(set(proxy_warnings)),
+        "contribution_mode": mode,
+    }
 
 
 def get_feature_contributions(
     model_id: int,
     db: Optional[Session] = None,
     window_size: int = 100,
+    min_group_size: int = 5,
 ) -> Dict[str, Any]:
     owns_session = db is None
     if owns_session:
@@ -145,6 +319,7 @@ def get_feature_contributions(
             return {
                 "top_contributing_features": [],
                 "proxy_warnings": [],
+                "contribution_mode": "unavailable",
             }
 
         predictions = (
@@ -159,6 +334,7 @@ def get_feature_contributions(
             return {
                 "top_contributing_features": [],
                 "proxy_warnings": [],
+                "contribution_mode": "unavailable",
             }
 
         sensitive_attributes = list(model.sensitive_attributes or [])
@@ -167,6 +343,7 @@ def get_feature_contributions(
             return {
                 "top_contributing_features": [],
                 "proxy_warnings": [],
+                "contribution_mode": "unavailable",
             }
 
         excluded = {"output_decision", "true_label", *sensitive_attributes}
@@ -175,40 +352,38 @@ def get_feature_contributions(
             return {
                 "top_contributing_features": [],
                 "proxy_warnings": [],
+                "contribution_mode": "unavailable",
             }
 
         X = pd.DataFrame({column: _series_to_numeric(df[column]) for column in candidate_features})
         X = X.fillna(X.median(numeric_only=True)).fillna(0)
         y = pd.to_numeric(df["output_decision"], errors="coerce").fillna(0).astype(int)
 
-        shap_matrix = _compute_shap_values(X, y)
-        if shap_matrix.size == 0:
-            return {
-                "top_contributing_features": [],
-                "proxy_warnings": [],
-            }
-
         feature_diffs = {feature: 0.0 for feature in candidate_features}
-        for attribute in sensitive_attributes:
-            if attribute not in df.columns:
-                continue
+        contribution_mode = "shap"
+        try:
+            shap_matrix = _compute_shap_values(X, y)
+            if shap_matrix.size > 0:
+                feature_diffs = _pairwise_disparity_from_shap(
+                    df,
+                    shap_matrix,
+                    candidate_features,
+                    sensitive_attributes,
+                    min_group_size=min_group_size,
+                )
+        except Exception:
+            feature_diffs, contribution_mode = _fallback_feature_diffs(
+                df,
+                candidate_features,
+                sensitive_attributes,
+            )
 
-            groups = [group for group in df[attribute].dropna().astype(str).unique().tolist() if group]
-            if len(groups) < 2:
-                continue
-
-            for group_a, group_b in combinations(groups, 2):
-                mask_a = df[attribute].astype(str) == str(group_a)
-                mask_b = df[attribute].astype(str) == str(group_b)
-                if not mask_a.any() or not mask_b.any():
-                    continue
-
-                mean_a = np.abs(shap_matrix[mask_a.to_numpy()]).mean(axis=0)
-                mean_b = np.abs(shap_matrix[mask_b.to_numpy()]).mean(axis=0)
-                diff = np.abs(mean_a - mean_b)
-
-                for index, feature in enumerate(candidate_features):
-                    feature_diffs[feature] += float(diff[index])
+        if sum(feature_diffs.values()) <= 0:
+            feature_diffs, contribution_mode = _fallback_feature_diffs(
+                df,
+                candidate_features,
+                sensitive_attributes,
+            )
 
         proxy_warnings: List[str] = []
         proxy_risk_features: set[str] = set()
@@ -228,28 +403,18 @@ def get_feature_contributions(
                         f"{feature} correlates {abs(float(corr)):.2f} with {attribute}"
                     )
 
-        total_diff = sum(feature_diffs.values())
-        ranked = sorted(feature_diffs.items(), key=lambda item: item[1], reverse=True)[:5]
-
-        top_contributing_features = []
-        for feature, score in ranked:
-            pct = 0.0 if total_diff <= 0 else (float(score) / float(total_diff)) * 100.0
-            top_contributing_features.append(
-                {
-                    "feature": feature,
-                    "contribution_pct": round(pct, 2),
-                    "proxy_risk": feature in proxy_risk_features,
-                }
-            )
-
-        return {
-            "top_contributing_features": top_contributing_features,
-            "proxy_warnings": sorted(set(proxy_warnings)),
-        }
+        return format_contribution_output(
+            contribution_scores=feature_diffs,
+            proxy_risk_features=proxy_risk_features,
+            proxy_warnings=proxy_warnings,
+            mode=contribution_mode,
+            top_k=5,
+        )
     except Exception:
         return {
             "top_contributing_features": [],
             "proxy_warnings": [],
+            "contribution_mode": "unavailable",
         }
     finally:
         if owns_session and db is not None:
@@ -264,17 +429,33 @@ def _metric_row(
     score: float,
     value_a: float,
     value_b: float,
+    sample_size_a: int,
+    sample_size_b: int,
 ) -> Dict[str, Any]:
+    interpretation = interpret_metric(
+        metric_name,
+        score,
+        group_a=f"{attribute}:{group_a}",
+        group_b=f"{attribute}:{group_b}",
+        value_a=value_a,
+        value_b=value_b,
+        sample_size_a=sample_size_a,
+        sample_size_b=sample_size_b,
+    )
+
     return {
         "metric_name": metric_name,
         "attribute": attribute,
         "group_a": f"{attribute}:{group_a}",
         "group_b": f"{attribute}:{group_b}",
         "disparity_score": round(float(score), 4),
-        "severity": determine_severity(float(score)),
+        "severity": interpretation["severity"],
+        "metric_meaning": interpretation["meaning"],
         "details": {
             "group_a_value": round(float(value_a), 4),
             "group_b_value": round(float(value_b), 4),
+            "group_a_n": int(sample_size_a),
+            "group_b_n": int(sample_size_b),
         },
     }
 
@@ -331,11 +512,23 @@ def run_bias_analysis(
             if baseline is None:
                 continue
 
+            approval_counts = group_sample_counts(df, attribute)
             approval_rates = group_approval_rates(df, attribute)
+            positives_df = df[pd.to_numeric(df["true_label"], errors="coerce").fillna(0) == 1]
+            negatives_df = df[pd.to_numeric(df["true_label"], errors="coerce").fillna(0) == 0]
+
+            true_positive_counts = group_sample_counts(positives_df, attribute)
+            false_positive_counts = group_sample_counts(negatives_df, attribute)
+
             true_positive_rates = group_true_positive_rates(df, attribute)
             false_positive_rates = group_false_positive_rates(df, attribute)
 
-            for group_a, group_b, score, value_a, value_b in pairwise_gaps(approval_rates, baseline):
+            for group_a, group_b, score, value_a, value_b in pairwise_gaps(
+                approval_rates,
+                baseline,
+                group_counts=approval_counts,
+                min_group_size=5,
+            ):
                 report_rows.append(
                     _metric_row(
                         "Demographic Parity Difference",
@@ -345,10 +538,17 @@ def run_bias_analysis(
                         score,
                         value_a,
                         value_b,
+                        approval_counts.get(group_a, 0),
+                        approval_counts.get(group_b, 0),
                     )
                 )
 
-            for group_a, group_b, score, value_a, value_b in pairwise_gaps(true_positive_rates, baseline):
+            for group_a, group_b, score, value_a, value_b in pairwise_gaps(
+                true_positive_rates,
+                baseline,
+                group_counts=true_positive_counts,
+                min_group_size=5,
+            ):
                 report_rows.append(
                     _metric_row(
                         "Equal Opportunity Difference",
@@ -358,10 +558,17 @@ def run_bias_analysis(
                         score,
                         value_a,
                         value_b,
+                        true_positive_counts.get(group_a, 0),
+                        true_positive_counts.get(group_b, 0),
                     )
                 )
 
-            for group_a, group_b, score, value_a, value_b in pairwise_ratios(approval_rates, baseline):
+            for group_a, group_b, score, value_a, value_b in pairwise_ratios(
+                approval_rates,
+                baseline,
+                group_counts=approval_counts,
+                min_group_size=5,
+            ):
                 report_rows.append(
                     _metric_row(
                         "Disparate Impact Ratio",
@@ -371,10 +578,17 @@ def run_bias_analysis(
                         score,
                         value_a,
                         value_b,
+                        approval_counts.get(group_a, 0),
+                        approval_counts.get(group_b, 0),
                     )
                 )
 
-            for group_a, group_b, score, value_a, value_b in pairwise_gaps(false_positive_rates, baseline):
+            for group_a, group_b, score, value_a, value_b in pairwise_gaps(
+                false_positive_rates,
+                baseline,
+                group_counts=false_positive_counts,
+                min_group_size=5,
+            ):
                 report_rows.append(
                     _metric_row(
                         "False Positive Rate Gap",
@@ -384,6 +598,8 @@ def run_bias_analysis(
                         score,
                         value_a,
                         value_b,
+                        false_positive_counts.get(group_a, 0),
+                        false_positive_counts.get(group_b, 0),
                     )
                 )
 

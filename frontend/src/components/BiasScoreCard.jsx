@@ -28,15 +28,15 @@ function BiasScoreCard({ metricName, score = 0 }) {
   const percentage = Math.max(0, Math.min(100, safeScore * 100));
 
   return (
-    <article className="glass-panel rounded-2xl p-4">
+    <article className="glass-panel soft-shine rounded-2xl border border-slate-200/70 p-4">
       <div className="flex items-start justify-between gap-2">
-        <h3 className="text-sm font-semibold text-slate-700">{metricName}</h3>
+        <h3 className="text-sm font-bold text-slate-800">{metricName}</h3>
         <span className={`rounded-full px-2 py-1 text-xs font-semibold ${tone.badge}`}>{tone.label}</span>
       </div>
 
-      <p className="mt-4 font-mono text-3xl font-semibold tracking-tight text-fair-ink">{safeScore.toFixed(3)}</p>
+      <p className="mt-4 font-mono text-3xl font-bold tracking-tight text-fair-ink">{safeScore.toFixed(3)}</p>
 
-      <div className="mt-4 h-2 overflow-hidden rounded-full bg-slate-200">
+      <div className="mt-4 h-2.5 overflow-hidden rounded-full bg-slate-200">
         <div
           className={`metric-bar h-full rounded-full ${tone.bar}`}
           style={{ width: `${percentage}%` }}
