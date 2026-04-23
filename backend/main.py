@@ -30,6 +30,10 @@ def on_startup() -> None:
     init_db()
 
 
+@app.get("/")
+def root():
+    return {"status": "ok"}
+
 @app.get("/api/health")
 def health_check():
     return {"status": "ok", "service": "FairWatch"}
