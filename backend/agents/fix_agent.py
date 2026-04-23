@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any, Dict
 
@@ -40,6 +41,37 @@ _load_local_env_file()
 client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 
 
+def _sanitize_impact_text(text: Any) -> str:
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        return "Expected to reduce disparity after validation on fresh evaluation data."
+
+    has_fake_precision = bool(
+        re.search(r"(~\s*\d|\bfrom\s+\d|\bto\s+\d|\d+\.\d+|\d+\s*%)", cleaned.lower())
+    )
+    if has_fake_precision:
+        return "Expected to reduce disparity, but exact impact must be validated on fresh evaluation data."
+
+    return cleaned
+
+
+def _sanitize_fix_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    fixes = payload.get("fixes", [])
+    if not isinstance(fixes, list):
+        payload["fixes"] = []
+        return payload
+
+    for fix in fixes:
+        if not isinstance(fix, dict):
+            continue
+        fix["impact"] = _sanitize_impact_text(fix.get("impact"))
+
+    if not payload.get("immediate_action"):
+        payload["immediate_action"] = "Review fairness risks and validate mitigation before deployment."
+
+    return payload
+
+
 def generate_fixes(bias_report_dict, feature_contributions):
     if not os.environ.get("GROQ_API_KEY"):
         return {
@@ -59,19 +91,19 @@ def generate_fixes(bias_report_dict, feature_contributions):
       "fixes": [
         {{
           "type": "reweight",
-          "action": "Increase sample weight of female records by 1.8x in training data",
-          "impact": "Expected to reduce DP difference from 0.34 to ~0.12",
+                    "action": "Increase sample weight for under-selected groups in training data",
+                    "impact": "Expected to reduce demographic parity disparity after validation",
           "priority": "critical"
         }},
         {{
           "type": "remove_proxy",
-          "action": "Drop zip_code column — correlates 0.73 with race attribute",
-          "impact": "Removes 18% of race-based disparity",
+                    "action": "Review and remove proxy-heavy features that closely track sensitive attributes",
+                    "impact": "Reduces proxy-driven disparity risk",
           "priority": "high"
         }},
         {{
           "type": "threshold_tuning",
-          "action": "Lower decision threshold for group=female from 0.5 to 0.40",
+                    "action": "Tune decision thresholds using a fairness-constrained validation process",
           "impact": "Equalizes approval rates without retraining",
           "priority": "medium"
         }}
@@ -90,7 +122,10 @@ def generate_fixes(bias_report_dict, feature_contributions):
         raw = response.choices[0].message.content
         # Strip markdown if present
         clean = raw.replace("```json", "").replace("```", "").strip()
-        return json.loads(clean)
+        parsed = json.loads(clean)
+        if not isinstance(parsed, dict):
+            raise ValueError("LLM response is not a JSON object")
+        return _sanitize_fix_payload(parsed)
     except Exception as exc:
         return {
             "fixes": [],

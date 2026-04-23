@@ -103,17 +103,7 @@ OFF_TOPIC_RESPONSE = {
 SYSTEM_PROMPT = """You are Fairness Copilot for FairWatch.
 
 Use only the provided context. Accept any question that is even loosely related to:
-- the model
-- the data
-- fairness
-- bias
-- decisions
-- impact
-- explanations
-- fixes
-- deployment safety
-
-Reject only clearly unrelated topics such as cooking, sports, movies, or unrelated small talk.
+... [trimmed system boundaries] ...
 
 Output STRICT JSON only:
 {
@@ -126,15 +116,13 @@ Output STRICT JSON only:
 Rules:
 - No markdown
 - No extra commentary outside JSON
-- Keep the answer short and plain English
-- Base every claim only on the supplied context
-- Mention affected groups when available
-- Mention root cause when available
-- Mention recommended action when available
-- If the user says hello or hi, reply with a short greeting and offer help with fairness analysis
-- If the user asks about data, explain how the current data is affecting fairness
-- If the latest status is critical or red, clearly say the model is unsafe to deploy
-- Do not use vague refusals unless the question is truly unrelated
+- Must explain decisions in human terms
+- Must mention who is affected and why the decision was blocked
+- Must NOT output raw metrics first
+- If the status is unsafe (blocked), answer clearly. Example: "This decision was blocked because the model favors male applicants. Female applicants were receiving fewer approvals."
+- Keep the answer plain English
+- If the user says hello or hi, reply with a short greeting
+- Distinguish live window metrics from aggregate metrics when relevant
 - For unrelated questions, return exactly:
   {"answer":"I can only help with AI fairness and model decisions.","risk_level":"safe","affected_groups":[],"recommended_action":"Ask about the model, data, bias, or deployment safety."}
 """
@@ -259,7 +247,7 @@ def _metric_text(snapshot: Dict[str, Any]) -> str:
     if not metric:
         return ""
 
-    meaning = str(metric.get("metric_meaning") or "").strip()
+    meaning = str(metric.get("interpretation") or metric.get("metric_meaning") or "").strip()
     if meaning:
         return meaning
 
@@ -273,6 +261,8 @@ def _build_local_response(intent: str, snapshot: Dict[str, Any]) -> Dict[str, An
     groups_text = _groups_text(snapshot)
     root_cause_text = _root_cause_text(snapshot)
     metric_text = _metric_text(snapshot)
+    confidence_warning = str(snapshot.get("confidence_warning") or "").strip()
+    decision_reason = str(snapshot.get("decision_reason") or "").strip()
 
     if intent == "greeting":
         answer = "Hi. I can help explain the model's fairness status, affected groups, and deployment safety."
@@ -296,12 +286,16 @@ def _build_local_response(intent: str, snapshot: Dict[str, Any]) -> Dict[str, An
             answer += f" It is affecting {groups_text}."
         if root_cause_text:
             answer += f" Main drivers are {root_cause_text}."
+        if confidence_warning:
+            answer += f" {confidence_warning}."
     elif intent == "fix":
         answer = f"Start with {snapshot['recommended_action'].rstrip('.')}."
         if groups_text:
             answer += f" This targets {groups_text}."
         if root_cause_text:
             answer += f" The main drivers are {root_cause_text}."
+        if confidence_warning:
+            answer += f" {confidence_warning}."
     else:
         if risk_level == "unsafe":
             answer = "This model is unsafe to deploy."
@@ -316,6 +310,11 @@ def _build_local_response(intent: str, snapshot: Dict[str, Any]) -> Dict[str, An
             answer += f" Main drivers are {root_cause_text}."
         elif metric_text:
             answer += f" {metric_text}"
+
+    if decision_reason:
+        answer += f" Decision summary: {decision_reason}."
+    if confidence_warning and confidence_warning.lower() not in answer.lower():
+        answer += f" {confidence_warning}."
 
     return {
         "answer": answer.strip(),
@@ -380,6 +379,7 @@ def handle_query(query: str, context: Dict[str, Any]) -> Dict[str, Any]:
         feature_contributions=context.get("feature_contributions"),
         fix_suggestions=context.get("fix_suggestions"),
         explicit_severity=context.get("overall_severity"),
+        decision_summary=context.get("decision_summary"),
     )
     fallback = _build_local_response(intent, snapshot)
 

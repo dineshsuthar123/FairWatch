@@ -17,6 +17,16 @@ def _severity_from_slope(slope: float) -> str:
     return "yellow"
 
 
+def _trend_phrase(slope: float) -> str:
+    if slope > 0.15:
+        return "increasing rapidly"
+    if slope > 0.08:
+        return "increasing steadily"
+    if slope > 0.05:
+        return "increasing slightly"
+    return "stable"
+
+
 def _log_webhook_alert(payload: Dict[str, Any]) -> None:
     print(f"[FAIRWATCH_WEBHOOK] {json.dumps(payload, default=str)}")
 
@@ -39,7 +49,7 @@ def detect_drift(model_id: int, db: Optional[Session] = None) -> Dict[str, Any]:
             return {
                 "triggered": False,
                 "reason": "insufficient_reports",
-                "slope": 0.0,
+                "trend_explanation": "Not enough report history to assess drift trend.",
             }
 
         origin = reports[0].timestamp
@@ -55,16 +65,16 @@ def detect_drift(model_id: int, db: Optional[Session] = None) -> Dict[str, Any]:
             return {
                 "triggered": False,
                 "reason": "insufficient_temporal_variation",
-                "slope": 0.0,
+                "trend_explanation": "Not enough timestamp variation to assess drift trend.",
             }
 
         try:
-            slope, intercept, r_value, p_value, std_err = linregress(x_values, y_values)
+            slope, _, _, _, _ = linregress(x_values, y_values)
         except ValueError:
             return {
                 "triggered": False,
                 "reason": "regression_unavailable",
-                "slope": 0.0,
+                "trend_explanation": "Trend regression is unavailable for current report history.",
             }
         slope = float(slope)
 
@@ -72,16 +82,16 @@ def detect_drift(model_id: int, db: Optional[Session] = None) -> Dict[str, Any]:
             return {
                 "triggered": False,
                 "reason": "slope_below_threshold",
-                "slope": round(slope, 4),
-                "r_value": round(float(r_value), 4),
+                "trend_explanation": "Fairness disparity trend is stable or improving.",
             }
 
         severity = _severity_from_slope(slope)
+        trend_phrase = _trend_phrase(slope)
         worst_report = max(reports, key=lambda report: float(report.disparity_score))
 
         message = (
             f"Bias drift detected in {worst_report.metric_name} for {worst_report.group_b}. "
-            f"Current drift slope={slope:.4f}, latest disparity={worst_report.disparity_score:.4f}."
+            f"Disparity is {trend_phrase} over recent reports."
         )
 
         alert = Alert(
@@ -109,8 +119,7 @@ def detect_drift(model_id: int, db: Optional[Session] = None) -> Dict[str, Any]:
             "alert_id": alert.id,
             "severity": severity,
             "message": message,
-            "slope": round(slope, 4),
-            "r_value": round(float(r_value), 4),
+            "trend_explanation": message,
         }
     finally:
         if owns_session and db is not None:

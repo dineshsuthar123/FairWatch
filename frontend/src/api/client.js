@@ -7,8 +7,35 @@ const api = axios.create({
   timeout: 20000,
 });
 
+const flattenErrorDetail = (detail) => {
+  if (detail == null) {
+    return "";
+  }
+
+  if (Array.isArray(detail)) {
+    return detail.map(flattenErrorDetail).filter(Boolean).join(" ");
+  }
+
+  if (typeof detail === "object") {
+    if (detail.msg) {
+      const location = Array.isArray(detail.loc)
+        ? detail.loc.filter((part) => part !== "body").join(".")
+        : "";
+      return location ? `${location}: ${detail.msg}` : String(detail.msg);
+    }
+
+    return Object.values(detail).map(flattenErrorDetail).filter(Boolean).join(" ");
+  }
+
+  return String(detail);
+};
+
 const toErrorMessage = (error, fallbackMessage) =>
-  error?.response?.data?.detail || error?.message || fallbackMessage;
+  flattenErrorDetail(error?.response?.data?.detail) ||
+  flattenErrorDetail(error?.response?.data?.message) ||
+  flattenErrorDetail(error?.response?.data) ||
+  error?.message ||
+  fallbackMessage;
 
 export const getModels = async () => {
   const response = await api.get("/api/models");

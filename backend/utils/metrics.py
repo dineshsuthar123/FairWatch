@@ -1,6 +1,9 @@
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
+
+SEVERITY_RANK = {"green": 1, "yellow": 2, "red": 3}
+CONFIDENCE_RANK = {"low": 1, "medium": 2, "high": 3}
 
 
 def safe_divide(numerator: float, denominator: float) -> float:
@@ -27,8 +30,6 @@ def determine_severity(score: float, metric_name: Optional[str] = None) -> str:
     if metric_name == "Disparate Impact Ratio":
         if 0.8 <= score <= 1.25:
             return "green"
-        if (0.7 <= score < 0.8) or (1.25 < score <= 1.4):
-            return "yellow"
         return "red"
 
     if score < 0.1:
@@ -36,6 +37,21 @@ def determine_severity(score: float, metric_name: Optional[str] = None) -> str:
     if score <= 0.2:
         return "yellow"
     return "red"
+
+
+def confidence_from_sample_size(sample_size: int) -> str:
+    size = int(sample_size)
+    if size < 50:
+        return "low"
+    if size <= 200:
+        return "medium"
+    return "high"
+
+
+def confidence_warning(confidence: str) -> str:
+    if str(confidence).lower() == "low":
+        return "Low confidence: results may be unstable"
+    return ""
 
 
 def majority_group(df: pd.DataFrame, group_col: str) -> Optional[str]:
@@ -172,83 +188,134 @@ def pairwise_ratios(
     return rows
 
 
-def _severity_label(severity: str) -> str:
-    if severity == "green":
-        return "acceptable"
-    if severity == "yellow":
-        return "moderate concern"
-    return "severe imbalance"
+def metric_risk_distance(metric_name: str, value: float) -> float:
+    value = float(value)
+    if metric_name == "Disparate Impact Ratio":
+        if value == float("inf"):
+            return float("inf")
+        return abs(1.0 - value)
+    return abs(value)
 
 
 def interpret_metric(
-    metric_name,
-    score,
+    metric_name: str,
+    value: float,
     group_a: Optional[str] = None,
     group_b: Optional[str] = None,
     value_a: Optional[float] = None,
     value_b: Optional[float] = None,
-    sample_size_a: Optional[int] = None,
-    sample_size_b: Optional[int] = None,
-):
-    score = float(score)
-    severity = determine_severity(score, metric_name)
-    label = _severity_label(severity)
+) -> Dict[str, str]:
+    value = float(value)
+    severity = determine_severity(value, metric_name)
 
-    display_a = str(group_a or "group_a")
-    display_b = str(group_b or "group_b")
+    group_a_label = str(group_a or "group A")
+    group_b_label = str(group_b or "group B")
 
     if metric_name == "Demographic Parity Difference":
-        diff = score
-        if value_a is not None and value_b is not None:
-            delta = float(value_a) - float(value_b)
-            direction = "fewer" if delta >= 0 else "more"
-            detail = f"{display_b} receives {abs(delta):.0%} {direction} approvals than {display_a}"
+        gap = abs(value)
+        if severity == "green":
+            interpretation = f"DP = {gap:.2f} -> acceptable ({gap:.0%} approval gap)"
+        elif severity == "yellow":
+            near = " near high-disparity threshold" if gap >= 0.18 else ""
+            interpretation = f"DP = {gap:.2f} -> moderate concern ({gap:.0%} approval gap{near})"
         else:
-            detail = "approval rates differ across groups"
-        meaning = f"DP = {diff:.2f} -> {label} ({detail})"
+            interpretation = f"DP = {gap:.2f} -> high disparity ({gap:.0%} approval gap)"
 
     elif metric_name == "Equal Opportunity Difference":
-        diff = score
-        if value_a is not None and value_b is not None:
-            delta = float(value_a) - float(value_b)
-            direction = "less" if delta >= 0 else "more"
-            detail = (
-                f"qualified {display_b} applicants are approved {abs(delta):.0%} {direction} often than {display_a}"
-            )
+        gap = abs(value)
+        if severity == "green":
+            interpretation = f"EO = {gap:.2f} -> acceptable ({gap:.0%} true-positive gap)"
+        elif severity == "yellow":
+            near = " near high-disparity threshold" if gap >= 0.18 else ""
+            interpretation = f"EO = {gap:.2f} -> moderate concern ({gap:.0%} true-positive gap{near})"
         else:
-            detail = "true positive rates differ across groups"
-        meaning = f"EO = {diff:.2f} -> {label} ({detail})"
-
-    elif metric_name == "Disparate Impact Ratio":
-        ratio = score
-        if ratio == float("inf"):
-            detail = f"{display_a} has near-zero favorable outcomes while {display_b} does not"
-            meaning = f"DI ratio = inf -> severe imbalance ({detail})"
-        else:
-            detail = f"{display_b} receives {ratio:.0%} of {display_a} approvals"
-            meaning = f"DI ratio = {ratio:.2f} -> {label} ({detail})"
+            interpretation = f"EO = {gap:.2f} -> high disparity ({gap:.0%} true-positive gap)"
 
     elif metric_name == "False Positive Rate Gap":
-        diff = score
-        if value_a is not None and value_b is not None:
-            delta = float(value_b) - float(value_a)
-            direction = "higher" if delta >= 0 else "lower"
-            detail = f"{display_b} has {abs(delta):.0%} {direction} false-positive rate than {display_a}"
+        gap = abs(value)
+        if severity == "green":
+            interpretation = f"FPR = {gap:.2f} -> acceptable ({gap:.0%} false-positive gap)"
+        elif severity == "yellow":
+            near = " near high-disparity threshold" if gap >= 0.18 else ""
+            interpretation = f"FPR = {gap:.2f} -> moderate concern ({gap:.0%} false-positive gap{near})"
         else:
-            detail = "false-positive rates differ across groups"
-        meaning = f"FPR gap = {diff:.2f} -> {label} ({detail})"
+            interpretation = f"FPR = {gap:.2f} -> high disparity ({gap:.0%} false-positive gap)"
+
+    elif metric_name == "Disparate Impact Ratio":
+        ratio = value
+        if ratio == float("inf"):
+            interpretation = (
+                f"DI = inf -> high disparity ({group_b_label} receives far more approvals than {group_a_label})"
+            )
+        elif 0.8 <= ratio <= 1.25:
+            imbalance = abs(1.0 - ratio)
+            direction = "fewer" if ratio < 1.0 else "more"
+            interpretation = (
+                f"DI = {ratio:.2f} -> acceptable with mild imbalance "
+                f"({group_b_label} receives {imbalance:.0%} {direction} approvals than {group_a_label})"
+            )
+        else:
+            imbalance = abs(1.0 - ratio)
+            direction = "fewer" if ratio < 1.0 else "more"
+            interpretation = (
+                f"DI = {ratio:.2f} -> high disparity "
+                f"({group_b_label} receives {imbalance:.0%} {direction} approvals than {group_a_label})"
+            )
 
     else:
-        meaning = f"{metric_name} = {score:.3f} -> {label}"
-
-    if sample_size_a is not None and sample_size_b is not None:
-        if min(int(sample_size_a), int(sample_size_b)) < 10:
-            meaning = (
-                f"{meaning} [low sample size: {display_a}=n{int(sample_size_a)}, "
-                f"{display_b}=n{int(sample_size_b)}]"
-            )
+        interpretation = f"{metric_name} = {value:.3f}"
 
     return {
         "severity": severity,
-        "meaning": meaning,
+        "interpretation": interpretation,
+    }
+
+
+def summarize_decision(metrics: List[Dict[str, Any]], scope_label: str = "live_window") -> Dict[str, str]:
+    if not metrics:
+        return {
+            "status": "safe",
+            "confidence": "low",
+            "reason": f"Safe - no {scope_label} fairness metrics are available yet",
+        }
+
+    ranked = sorted(
+        metrics,
+        key=lambda metric: (
+            SEVERITY_RANK.get(str(metric.get("severity", "")).lower(), 0),
+            metric_risk_distance(str(metric.get("metric_name", "")), float(metric.get("value", metric.get("disparity_score", 0.0)))),
+        ),
+        reverse=True,
+    )
+
+    worst = ranked[0]
+    worst_severity = str(worst.get("severity", "green")).lower()
+
+    if worst_severity == "red":
+        status = "unsafe"
+    elif worst_severity == "yellow":
+        status = "risky"
+    else:
+        status = "safe"
+
+    confidences = [str(metric.get("confidence", "low")).lower() for metric in metrics]
+    min_confidence = min(confidences, key=lambda item: CONFIDENCE_RANK.get(item, 1)) if confidences else "low"
+
+    reason = (
+        f"{status.capitalize()} - {worst.get('metric_name', 'metric')} indicates "
+        f"{worst_severity} disparity for {worst.get('group_b', 'monitored group')} "
+        f"with {min_confidence} confidence"
+    )
+
+    affected_groups = []
+    if status in ("unsafe", "risky") and "group_b" in worst:
+        group_val = str(worst["group_b"]).split(":")[-1]
+        if group_val:
+            affected_groups.append(group_val)
+
+    return {
+        "status": status,
+        "confidence": min_confidence,
+        "reason": reason,
+        "affected_groups": affected_groups,
     }

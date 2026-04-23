@@ -19,7 +19,7 @@ function AlertBanner({ severity = "green", message = "" }) {
   const icon = severity === "red" ? "⚠" : severity === "yellow" ? "!" : "✓";
 
   return (
-    <div className={`glass-panel rounded-2xl border px-4 py-3 text-sm font-semibold shadow-sm ${activeStyle.className}`}>
+    <div className={`bg-transparent rounded-2xl border px-4 py-3 text-sm font-semibold shadow-sm ${activeStyle.className}`}>
       <div className="flex items-center gap-2">
         <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-white/80 text-xs font-bold">{icon}</span>
         <span>{message || activeStyle.message}</span>

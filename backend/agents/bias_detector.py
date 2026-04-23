@@ -15,14 +15,18 @@ from sqlalchemy.orm import Session
 from database import SessionLocal
 from models import ModelRegistry, Prediction
 from utils.metrics import (
+    confidence_from_sample_size,
+    confidence_warning,
     group_approval_rates,
     group_false_positive_rates,
     group_sample_counts,
     group_true_positive_rates,
     interpret_metric,
     majority_group,
+    metric_risk_distance,
     pairwise_gaps,
     pairwise_ratios,
+    summarize_decision,
 )
 
 
@@ -292,6 +296,9 @@ def format_contribution_output(
             "contribution_pct": pct,
             "proxy_risk": feature in proxy_risk_features,
             "contribution_mode": mode,
+            "association_statement": (
+                f"{feature} is strongly associated with the observed disparity and influences model decisions"
+            ),
         }
         for feature, pct in ranked
     ]
@@ -306,7 +313,7 @@ def format_contribution_output(
 def get_feature_contributions(
     model_id: int,
     db: Optional[Session] = None,
-    window_size: int = 100,
+    window_size: Optional[int] = 100,
     min_group_size: int = 5,
 ) -> Dict[str, Any]:
     owns_session = db is None
@@ -322,13 +329,14 @@ def get_feature_contributions(
                 "contribution_mode": "unavailable",
             }
 
-        predictions = (
+        query = (
             db.query(Prediction)
             .filter(Prediction.model_id == model_id)
             .order_by(Prediction.timestamp.desc())
-            .limit(window_size)
-            .all()
         )
+        if window_size and window_size > 0:
+            query = query.limit(window_size)
+        predictions = query.all()
 
         if not predictions:
             return {
@@ -431,6 +439,7 @@ def _metric_row(
     value_b: float,
     sample_size_a: int,
     sample_size_b: int,
+    metric_scope: str,
 ) -> Dict[str, Any]:
     interpretation = interpret_metric(
         metric_name,
@@ -439,18 +448,33 @@ def _metric_row(
         group_b=f"{attribute}:{group_b}",
         value_a=value_a,
         value_b=value_b,
-        sample_size_a=sample_size_a,
-        sample_size_b=sample_size_b,
     )
 
+    sample_min = min(int(sample_size_a), int(sample_size_b))
+    confidence = confidence_from_sample_size(sample_min)
+    warning = confidence_warning(confidence)
+    metric_value = round(float(score), 4)
+
     return {
+        "metric": metric_name,
         "metric_name": metric_name,
+        "metric_type": metric_scope,
+        "metric_scope": metric_scope,
         "attribute": attribute,
         "group_a": f"{attribute}:{group_a}",
         "group_b": f"{attribute}:{group_b}",
-        "disparity_score": round(float(score), 4),
+        "value": metric_value,
+        "disparity_score": metric_value,
         "severity": interpretation["severity"],
-        "metric_meaning": interpretation["meaning"],
+        "interpretation": interpretation["interpretation"],
+        "metric_meaning": interpretation["interpretation"],
+        "sample_size": {
+            "group_a": int(sample_size_a),
+            "group_b": int(sample_size_b),
+            "minimum": sample_min,
+        },
+        "confidence": confidence,
+        "confidence_warning": warning,
         "details": {
             "group_a_value": round(float(value_a), 4),
             "group_b_value": round(float(value_b), 4),
@@ -462,9 +486,10 @@ def _metric_row(
 
 def run_bias_analysis(
     model_id: int,
-    window_size: int = 100,
+    window_size: Optional[int] = 100,
     db: Optional[Session] = None,
     as_of: Optional[datetime] = None,
+    scope_label: str = "live_window",
 ) -> Dict[str, Any]:
     owns_session = db is None
     if owns_session:
@@ -476,28 +501,39 @@ def run_bias_analysis(
             return {
                 "model_id": model_id,
                 "window_size": 0,
+                "metric_scope": scope_label,
                 "generated_at": datetime.utcnow().isoformat(),
                 "reports": [],
-                "summary": {"max_disparity": 0.0, "worst_metric": None, "status": "model_not_found"},
+                "summary": {
+                    "max_disparity": 0.0,
+                    "worst_metric": None,
+                    "status": "model_not_found",
+                },
+                "decision_summary": summarize_decision([], scope_label),
             }
 
         query = db.query(Prediction).filter(Prediction.model_id == model_id)
         if as_of is not None:
             query = query.filter(Prediction.timestamp <= as_of)
 
-        predictions = (
-            query.order_by(Prediction.timestamp.desc())
-            .limit(window_size)
-            .all()
-        )
+        query = query.order_by(Prediction.timestamp.desc())
+        if window_size and window_size > 0:
+            query = query.limit(window_size)
+        predictions = query.all()
 
         if not predictions:
             return {
                 "model_id": model_id,
                 "window_size": 0,
+                "metric_scope": scope_label,
                 "generated_at": datetime.utcnow().isoformat(),
                 "reports": [],
-                "summary": {"max_disparity": 0.0, "worst_metric": None, "status": "no_predictions"},
+                "summary": {
+                    "max_disparity": 0.0,
+                    "worst_metric": None,
+                    "status": "no_predictions",
+                },
+                "decision_summary": summarize_decision([], scope_label),
             }
 
         sensitive_attributes = model.sensitive_attributes or []
@@ -540,6 +576,7 @@ def run_bias_analysis(
                         value_b,
                         approval_counts.get(group_a, 0),
                         approval_counts.get(group_b, 0),
+                        scope_label,
                     )
                 )
 
@@ -560,6 +597,7 @@ def run_bias_analysis(
                         value_b,
                         true_positive_counts.get(group_a, 0),
                         true_positive_counts.get(group_b, 0),
+                        scope_label,
                     )
                 )
 
@@ -580,6 +618,7 @@ def run_bias_analysis(
                         value_b,
                         approval_counts.get(group_a, 0),
                         approval_counts.get(group_b, 0),
+                        scope_label,
                     )
                 )
 
@@ -600,15 +639,31 @@ def run_bias_analysis(
                         value_b,
                         false_positive_counts.get(group_a, 0),
                         false_positive_counts.get(group_b, 0),
+                        scope_label,
                     )
                 )
 
-        max_disparity = max((row["disparity_score"] for row in report_rows), default=0.0)
-        worst_row = max(report_rows, key=lambda row: row["disparity_score"], default=None)
+        max_disparity = max(
+            (
+                metric_risk_distance(row["metric_name"], float(row.get("value", row.get("disparity_score", 0.0))))
+                for row in report_rows
+            ),
+            default=0.0,
+        )
+        worst_row = max(
+            report_rows,
+            key=lambda row: metric_risk_distance(
+                row["metric_name"],
+                float(row.get("value", row.get("disparity_score", 0.0))),
+            ),
+            default=None,
+        )
+        decision_summary = summarize_decision(report_rows, scope_label)
 
         return {
             "model_id": model_id,
             "window_size": len(predictions),
+            "metric_scope": scope_label,
             "generated_at": datetime.utcnow().isoformat(),
             "reports": report_rows,
             "summary": {
@@ -616,6 +671,7 @@ def run_bias_analysis(
                 "worst_metric": worst_row["metric_name"] if worst_row else None,
                 "status": "ok",
             },
+            "decision_summary": decision_summary,
         }
     finally:
         if owns_session and db is not None:

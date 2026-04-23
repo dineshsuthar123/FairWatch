@@ -5,20 +5,20 @@ export default {
     extend: {
       colors: {
         fair: {
-          green: "#147d64",
+          green: "#059669",
           yellow: "#d97706",
-          red: "#b42318",
-          ink: "#102a43",
-          surface: "#fffef8",
+          red: "#dc2626",
+          ink: "#0f172a",
+          surface: "#ffffff",
         },
       },
       boxShadow: {
-        glow: "0 20px 50px rgba(16, 42, 67, 0.12)",
+        bento: "0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -2px rgba(0, 0, 0, 0.05)",
       },
       fontFamily: {
-        heading: ["Sora", "sans-serif"],
-        body: ["Sora", "sans-serif"],
-        mono: ["IBM Plex Mono", "monospace"],
+        heading: ["Inter", "sans-serif"],
+        body: ["Inter", "sans-serif"],
+        mono: ["JetBrains Mono", "monospace"],
       },
     },
   },

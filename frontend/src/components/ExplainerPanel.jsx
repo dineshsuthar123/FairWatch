@@ -189,7 +189,7 @@ function ExplainerPanel({
   const badge = severityBadge(severity);
 
   return (
-    <section className="glass-panel rounded-2xl p-5">
+    <section className="bg-transparent rounded-2xl p-5">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div>
           <div className="flex flex-wrap items-center gap-2">

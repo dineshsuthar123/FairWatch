@@ -13,9 +13,12 @@ from agents.explainer_agent import generate_explanation
 from agents.fix_agent import generate_fixes
 from database import get_db
 from models import Alert, BiasReport, ModelRegistry, Prediction
+from utils.metrics import summarize_decision
 
 router = APIRouter(tags=["monitor"])
-MONITOR_ANALYSIS_INTERVAL = 25
+MONITOR_MIN_SAMPLES = 20
+MONITOR_ANALYSIS_INTERVAL = 20
+MONITOR_WINDOW_SIZE = 100
 
 
 class PredictionItem(BaseModel):
@@ -58,26 +61,55 @@ def _serialize_group_label(group_label: Union[str, Dict[str, str]]) -> str:
 
 
 def _run_full_pipeline(model_id: int, db: Session) -> Dict[str, Any]:
-    analysis = run_bias_analysis(model_id=model_id, window_size=100, db=db)
-    feature_contributions = get_feature_contributions(model_id=model_id, db=db, window_size=100)
-    fix_suggestions = generate_fixes(analysis, feature_contributions)
-    explanation = generate_explanation(analysis, feature_contributions, fix_suggestions)
+    print(f"[MONITOR] Computing fairness metrics for model_id={model_id}")
+    window_analysis = run_bias_analysis(
+        model_id=model_id,
+        window_size=MONITOR_WINDOW_SIZE,
+        db=db,
+        scope_label="live_window",
+    )
+    aggregate_analysis = run_bias_analysis(
+        model_id=model_id,
+        window_size=None,
+        db=db,
+        scope_label="aggregate",
+    )
+    feature_contributions = get_feature_contributions(
+        model_id=model_id,
+        db=db,
+        window_size=MONITOR_WINDOW_SIZE,
+    )
+    fix_suggestions = generate_fixes(window_analysis, feature_contributions)
+    decision_summary = summarize_decision(window_analysis.get("reports", []), "live_window")
+    aggregate_decision_summary = summarize_decision(aggregate_analysis.get("reports", []), "aggregate")
+
+    explanation_payload = {
+        "model_id": model_id,
+        "generated_at": datetime.utcnow().isoformat(),
+        "reports": window_analysis.get("reports", []),
+        "summary": window_analysis.get("summary", {}),
+        "live_window_metrics": window_analysis.get("reports", []),
+        "aggregate_metrics": aggregate_analysis.get("reports", []),
+        "decision_summary": decision_summary,
+        "aggregate_decision_summary": aggregate_decision_summary,
+    }
+    explanation = generate_explanation(explanation_payload, feature_contributions, fix_suggestions)
 
     created_reports: List[BiasReport] = []
     report_timestamp = datetime.utcnow()
 
-    for item in analysis.get("reports", []):
+    for item in window_analysis.get("reports", []):
         report = BiasReport(
             model_id=model_id,
             timestamp=report_timestamp,
             metric_name=item["metric_name"],
             group_a=item["group_a"],
             group_b=item["group_b"],
-            disparity_score=float(item["disparity_score"]),
+            disparity_score=float(item.get("value", item.get("disparity_score", 0.0))),
             severity=item.get("severity", "green"),
             explanation=explanation,
             feature_contributions=feature_contributions,
-            metric_meaning=item.get("metric_meaning", ""),
+            metric_meaning=item.get("interpretation", item.get("metric_meaning", "")),
             fix_suggestions=fix_suggestions,
             monitoring_type="batch_window_100",
         )
@@ -88,11 +120,26 @@ def _run_full_pipeline(model_id: int, db: Session) -> Dict[str, Any]:
         db.commit()
         for report in created_reports:
             db.refresh(report)
+        print(
+            f"[MONITOR] Report generated for model_id={model_id} "
+            f"metrics={len(created_reports)} generated_at={report_timestamp.isoformat()}"
+        )
+    else:
+        print(f"[MONITOR] No fairness report rows generated for model_id={model_id}")
 
     drift_result = detect_drift(model_id=model_id, db=db)
+    print(f"[MONITOR] Drift result for model_id={model_id}: {drift_result}")
 
     return {
-        "analysis": analysis,
+        "analysis": window_analysis,
+        "window_analysis": window_analysis,
+        "aggregate_analysis": aggregate_analysis,
+        "metric_sets": {
+            "live_window_metrics": window_analysis.get("reports", []),
+            "aggregate_metrics": aggregate_analysis.get("reports", []),
+        },
+        "decision_summary": decision_summary,
+        "aggregate_decision_summary": aggregate_decision_summary,
         "feature_contributions": feature_contributions,
         "fix_suggestions": fix_suggestions,
         "explanation": explanation,
@@ -175,6 +222,7 @@ def _ingest_prediction(
     db.add(row)
     db.commit()
     db.refresh(row)
+    print(f"[MONITOR] Stored prediction id={row.id} model_id={model.id}")
     return row
 
 
@@ -207,7 +255,11 @@ def submit_predictions(payload: PredictionBatchRequest, db: Session = Depends(ge
         "model_id": payload.model_id,
         "saved_predictions": len(prediction_rows),
         "saved_reports": len(pipeline["created_reports"]),
-        "analysis_summary": pipeline["analysis"].get("summary", {}),
+        "analysis_summary": pipeline["window_analysis"].get("summary", {}),
+        "live_window_metrics": pipeline["window_analysis"].get("reports", []),
+        "aggregate_metrics": pipeline["aggregate_analysis"].get("reports", []),
+        "decision_summary": pipeline.get("decision_summary", {}),
+        "aggregate_decision_summary": pipeline.get("aggregate_decision_summary", {}),
         "drift": pipeline["drift"],
         "feature_contributions": pipeline["feature_contributions"],
         "fix_suggestions": pipeline["fix_suggestions"],
@@ -221,6 +273,7 @@ def stream_prediction(
     model_id: Optional[int] = None,
     db: Session = Depends(get_db),
 ):
+    print("[MONITOR] Received:", payload.dict())
     model = _resolve_model(db, model_id)
     prediction = _ingest_prediction(
         db=db,
@@ -237,9 +290,14 @@ def stream_prediction(
         .filter(Prediction.model_id == model.id)
         .count()
     )
+    current_window_size = min(total_predictions, MONITOR_WINDOW_SIZE)
     should_run_pipeline = (
-        total_predictions >= MONITOR_ANALYSIS_INTERVAL
+        total_predictions >= MONITOR_MIN_SAMPLES
         and total_predictions % MONITOR_ANALYSIS_INTERVAL == 0
+    )
+    print(
+        f"[MONITOR] model_id={model.id} total_predictions={total_predictions} "
+        f"window_size={current_window_size} trigger={should_run_pipeline}"
     )
 
     response = {
@@ -247,6 +305,7 @@ def stream_prediction(
         "model_id": model.id,
         "prediction_id": prediction.id,
         "total_predictions": total_predictions,
+        "window_size": current_window_size,
         "analysis_triggered": should_run_pipeline,
     }
 
@@ -255,7 +314,11 @@ def stream_prediction(
         response.update(
             {
                 "saved_reports": len(pipeline["created_reports"]),
-                "analysis_summary": pipeline["analysis"].get("summary", {}),
+                "analysis_summary": pipeline["window_analysis"].get("summary", {}),
+                "live_window_metrics": pipeline["window_analysis"].get("reports", []),
+                "aggregate_metrics": pipeline["aggregate_analysis"].get("reports", []),
+                "decision_summary": pipeline.get("decision_summary", {}),
+                "aggregate_decision_summary": pipeline.get("aggregate_decision_summary", {}),
                 "drift": pipeline["drift"],
             }
         )
@@ -320,6 +383,9 @@ async def inject_bias(model_id: int, db: Session = Depends(get_db)):
         "status": "bias injected",
         "predictions_added": 50,
         "alert_triggered": pipeline["drift"],
+        "decision_summary": pipeline.get("decision_summary", {}),
+        "live_window_metrics": pipeline["window_analysis"].get("reports", []),
+        "aggregate_metrics": pipeline["aggregate_analysis"].get("reports", []),
     }
 
 

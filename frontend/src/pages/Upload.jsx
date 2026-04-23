@@ -60,11 +60,18 @@ function Upload({ onModelRegistered }) {
       return;
     }
 
+    const cleanedAttributes = [...new Set(
+      selectedAttributes
+        .filter((attribute) => typeof attribute === "string")
+        .map((attribute) => attribute.trim())
+        .filter(Boolean),
+    )];
+
     setIsRegistering(true);
     try {
       const created = await registerModel({
         name: modelName.trim(),
-        sensitive_attributes: selectedAttributes,
+        sensitive_attributes: cleanedAttributes,
       });
 
       setSuccessMessage(`Model registered successfully. Model ID: ${created.id}`);
@@ -73,6 +80,7 @@ function Upload({ onModelRegistered }) {
         await onModelRegistered(created.id);
       }
     } catch (error) {
+      setSuccessMessage("");
       setErrorMessage(withApiError(error, "Failed to register model."));
     } finally {
       setIsRegistering(false);
@@ -81,7 +89,7 @@ function Upload({ onModelRegistered }) {
 
   return (
     <section className="space-y-4">
-      <div className="glass-panel rounded-2xl p-6">
+      <div className="bento-panel rounded-2xl p-8 bg-white border border-slate-200 shadow-sm">
         <h2 className="font-heading text-2xl font-bold">Upload Dataset and Register Model</h2>
         <p className="mt-1 text-sm text-slate-600">
           Drag and drop a CSV, review detected sensitive columns, then register a model for monitoring.
@@ -122,7 +130,7 @@ function Upload({ onModelRegistered }) {
       </div>
 
       {datasetInfo && (
-        <div className="glass-panel rounded-2xl p-6">
+        <div className="bento-panel rounded-2xl p-8 bg-white border border-slate-200 shadow-sm">
           <h3 className="font-heading text-lg font-bold">Detected Columns</h3>
           <p className="mt-1 text-sm text-slate-600">Suggested sensitive attributes are pre-selected.</p>
 

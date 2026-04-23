@@ -90,6 +90,7 @@ def _build_local_explanation(
         metrics=metrics,
         feature_contributions=feature_contributions,
         fix_suggestions=fix_suggestions,
+        decision_summary=bias_report_dict.get("decision_summary"),
     )
 
     top_metric = snapshot["top_metric"] or {}
@@ -105,6 +106,9 @@ def _build_local_explanation(
         headline = "Fairness risk needs action before deployment."
     else:
         headline = "No critical fairness issue detected."
+
+    if snapshot.get("confidence") == "low":
+        headline += " Low confidence"
 
     if top_metric:
         what_is_happening = (
@@ -128,6 +132,9 @@ def _build_local_explanation(
         real_world_impact = f"People in {groups_text} may receive uneven decisions unless the model is fixed."
     else:
         real_world_impact = f"No critical deployment block is shown right now, but {groups_text} should still be monitored."
+
+    if snapshot.get("confidence_warning"):
+        real_world_impact += f" {snapshot['confidence_warning']}."
 
     return {
         "headline": headline,

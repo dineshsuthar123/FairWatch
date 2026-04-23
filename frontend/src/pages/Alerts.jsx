@@ -73,7 +73,7 @@ function Alerts({ models }) {
 
   return (
     <section className="space-y-4">
-      <div className="glass-panel rounded-2xl p-6">
+      <div className="bento-panel bg-white rounded-2xl p-6">
         <h2 className="font-heading text-2xl font-bold">Active Alerts</h2>
         <p className="mt-1 text-sm text-slate-600">
           Review unresolved fairness alerts and resolve them after mitigation.
@@ -122,7 +122,7 @@ function Alerts({ models }) {
         <div className="rounded-xl border border-fair-red/30 bg-fair-red/10 px-4 py-3 text-sm text-fair-red">{errorMessage}</div>
       )}
 
-      <div className="glass-panel overflow-x-auto rounded-2xl p-4">
+      <div className="bento-panel bg-white overflow-x-auto rounded-2xl p-4">
         {isLoading && <p className="px-2 py-3 text-sm text-slate-600">Refreshing alerts...</p>}
 
         {!isLoading && !visibleAlerts.length ? (
