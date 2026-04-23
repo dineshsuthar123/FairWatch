@@ -1,3 +1,4 @@
+import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -10,9 +11,14 @@ app = FastAPI(
     version="1.0.0",
 )
 
+# In production, set FRONTEND_URL to your deployed frontend domain (e.g., "https://fairwatch.vercel.app")
+# Locally, it defaults to allowing Vite's default dev server ports
+frontend_url = os.getenv("FRONTEND_URL", "http://localhost:5173,http://localhost:5174")
+origins = [url.strip() for url in frontend_url.split(",")] if frontend_url else ["*"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
