@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from database import init_db
 from routers import alerts, chat, monitor, reports, upload, public_api
+import seed
 
 app = FastAPI(
     title="FairWatch API",
@@ -37,6 +38,14 @@ def root():
 @app.get("/api/health")
 def health_check():
     return {"status": "ok", "service": "FairWatch"}
+
+@app.get("/api/seed")
+def seed_database():
+    try:
+        seed.main()
+        return {"status": "success", "message": "Database seeded successfully!"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
 
 app.include_router(upload.router)
